@@ -22,8 +22,8 @@ class PeerDiscovery(
     private var resolving = false
 
     private val registration = object : NsdManager.RegistrationListener {
-        override fun onServiceRegistered(info: NsdServiceInfo) = Log.i(TAG, "Advertising as ${info.serviceName}")
-        override fun onRegistrationFailed(info: NsdServiceInfo, code: Int) = Log.w(TAG, "Register failed $code")
+        override fun onServiceRegistered(info: NsdServiceInfo) { Log.i(TAG, "Advertising as ${info.serviceName}") }
+        override fun onRegistrationFailed(info: NsdServiceInfo, code: Int) { Log.w(TAG, "Register failed $code") }
         override fun onServiceUnregistered(info: NsdServiceInfo) {}
         override fun onUnregistrationFailed(info: NsdServiceInfo, code: Int) {}
     }
@@ -31,7 +31,7 @@ class PeerDiscovery(
     private val discovery = object : NsdManager.DiscoveryListener {
         override fun onDiscoveryStarted(type: String) {}
         override fun onDiscoveryStopped(type: String) {}
-        override fun onStartDiscoveryFailed(type: String, code: Int) = Log.w(TAG, "Discovery failed $code")
+        override fun onStartDiscoveryFailed(type: String, code: Int) { Log.w(TAG, "Discovery failed $code") }
         override fun onStopDiscoveryFailed(type: String, code: Int) {}
         override fun onServiceFound(info: NsdServiceInfo) {
             if (info.serviceName != peerId) enqueueResolve(info)

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- Three linked nodes (the cluster) around a play triangle -->
+    <path android:strokeColor="#9EC5FF" android:strokeWidth="2"
+        android:pathData="M54,34 L36,66 L72,66 Z" />
+    <path android:fillColor="#9EC5FF" android:pathData="M54,34m-5,0a5,5 0,1 1,10 0a5,5 0,1 1,-10 0" />
+    <path android:fillColor="#9EC5FF" android:pathData="M36,66m-5,0a5,5 0,1 1,10 0a5,5 0,1 1,-10 0" />
+    <path android:fillColor="#9EC5FF" android:pathData="M72,66m-5,0a5,5 0,1 1,10 0a5,5 0,1 1,-10 0" />
+    <path android:fillColor="#FFFFFF" android:pathData="M49,46 L49,62 L62,54 Z" />
+</vector>
