@@ -18,6 +18,7 @@ import com.mediacluster.discovery.PeerDiscovery
 import com.mediacluster.dlna.ContentDirectory
 import com.mediacluster.dlna.SsdpServer
 import com.mediacluster.library.ClusterIndex
+import com.mediacluster.library.FolderSelection
 import com.mediacluster.library.MediaItem
 import com.mediacluster.library.MediaScanner
 import com.mediacluster.library.PeerInfo
@@ -26,9 +27,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
@@ -83,12 +85,15 @@ class ClusterService : Service() {
         discovery.start()
 
         scope.launch {
+            val folders = Cluster.folders(this@ClusterService).selected
             while (isActive) {
-                localItems = runCatching { scanner.scan() }.getOrElse { Log.w(TAG, "Scan failed", it); emptyList() }
+                val shared = folders.value
+                localItems = runCatching { scanner.scan(shared) }.getOrElse { Log.w(TAG, "Scan failed", it); emptyList() }
                 index.put(selfInfo(), localItems)
                 knownPeers.keys.forEach { refreshPeer(it) }
                 updateLeadership()
-                delay(REFRESH_MS)
+                // Rescan on the regular tick, or straight away when the user changes which folders are shared.
+                withTimeoutOrNull(REFRESH_MS) { folders.first { it != shared } }
             }
         }
     }
@@ -176,6 +181,13 @@ class ClusterService : Service() {
 /** Process-wide state shared between the service and the UI. */
 object Cluster {
     val index = ClusterIndex()
+
+    @Volatile private var folderSelection: FolderSelection? = null
+
+    fun folders(context: Context): FolderSelection =
+        folderSelection ?: synchronized(this) {
+            folderSelection ?: FolderSelection(context).also { folderSelection = it }
+        }
 
     fun peerId(context: Context): String {
         val prefs = context.getSharedPreferences("cluster", Context.MODE_PRIVATE)
