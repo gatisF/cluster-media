@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Bundle
 import android.text.format.Formatter
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
@@ -42,6 +43,8 @@ import com.mediacluster.Cluster
 import com.mediacluster.ClusterService
 import com.mediacluster.library.MediaFolder
 import com.mediacluster.library.MediaScanner
+import com.mediacluster.library.SharedFolders
+import com.mediacluster.library.covers
 import com.mediacluster.library.mediaUrl
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -68,7 +71,7 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun LibraryScreen() {
         val snap by Cluster.index.snapshot.collectAsStateWithLifecycle()
-        val shared by Cluster.folders(this).selected.collectAsStateWithLifecycle()
+        val shared by Cluster.folders(this).shared.collectAsStateWithLifecycle()
         var pickingFolders by remember { mutableStateOf(false) }
         Column(Modifier.padding(16.dp)) {
             Text("${snap.peers.size} phones in cluster", style = MaterialTheme.typography.headlineSmall)
@@ -78,7 +81,7 @@ class MainActivity : ComponentActivity() {
             )
             Text("On your TV, open the media/DLNA source \"MediaCluster\".", style = MaterialTheme.typography.bodySmall)
             OutlinedButton(onClick = { pickingFolders = true }, modifier = Modifier.padding(vertical = 8.dp)) {
-                Text(shared?.let { "Sharing ${it.size} folder${if (it.size == 1) "" else "s"}" } ?: "Sharing all folders")
+                Text(sharingLabel(shared))
             }
             LazyColumn {
                 items(snap.allItems, key = { it.id }) { item ->
@@ -101,54 +104,115 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** Lets the user choose which of this phone's media folders the cluster can see. */
+    private fun sharingLabel(shared: SharedFolders): String {
+        val picked = shared.trees.size
+        val media = shared.mediaFolders ?: return "Sharing all folders" + if (picked > 0) " + $picked picked" else ""
+        val n = media.size + picked
+        return "Sharing $n folder${if (n == 1) "" else "s"}"
+    }
+
+    /**
+     * Lets the user choose what the cluster can see: media folders (each with its subfolders),
+     * plus any other folder picked with the system folder picker.
+     */
     @Composable
-    private fun FolderDialog(current: Set<String>?, onDismiss: () -> Unit, onSave: (Set<String>?) -> Unit) {
+    private fun FolderDialog(current: SharedFolders, onDismiss: () -> Unit, onSave: (SharedFolders) -> Unit) {
         var folders by remember { mutableStateOf<List<MediaFolder>?>(null) }
-        var shareAll by remember { mutableStateOf(current == null) }
-        var checked by remember { mutableStateOf(current.orEmpty()) }
+        var shareAll by remember { mutableStateOf(current.mediaFolders == null) }
+        var checked by remember { mutableStateOf(current.mediaFolders.orEmpty()) }
+        var trees by remember { mutableStateOf(current.trees) }
+        val pickTree = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            if (uri != null) {
+                // Keep read access after a reboot so the service can go on serving this folder.
+                runCatching { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+                trees = trees + uri.toString()
+            }
+        }
         LaunchedEffect(Unit) {
             folders = withContext(Dispatchers.IO) {
                 runCatching { MediaScanner(this@MainActivity, Cluster.peerId(this@MainActivity)).folders() }.getOrDefault(emptyList())
             }
-            if (current == null) checked = folders.orEmpty().map { it.path }.toSet()
+            // Turning "all" off starts from everything ticked, which the top-level folders cover.
+            if (current.mediaFolders == null) checked = folders.orEmpty().filter { it.depth == 0 }.map { it.path }.toSet()
         }
+
+        fun finish(saved: SharedFolders?) {
+            // Give back folder access nobody uses any more: removed folders on save, newly picked ones on cancel.
+            val keep = saved?.trees ?: current.trees
+            (current.trees + trees - keep).forEach {
+                runCatching { contentResolver.releasePersistableUriPermission(Uri.parse(it), Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+            }
+            if (saved != null) onSave(saved) else onDismiss()
+        }
+
         AlertDialog(
-            onDismissRequest = onDismiss,
+            onDismissRequest = { finish(null) },
             title = { Text("Shared folders") },
             text = {
-                Column {
-                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                        Text("All folders, including new ones", Modifier.weight(1f))
-                        Switch(checked = shareAll, onCheckedChange = { shareAll = it })
+                LazyColumn(Modifier.heightIn(max = 440.dp)) {
+                    item {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                            Text("All media folders, including new ones", Modifier.weight(1f))
+                            Switch(checked = shareAll, onCheckedChange = { shareAll = it })
+                        }
+                        HorizontalDivider(Modifier.padding(vertical = 8.dp))
                     }
-                    HorizontalDivider(Modifier.padding(vertical = 8.dp))
                     val list = folders
                     when {
-                        list == null -> Text("Looking for media folders…")
-                        list.isEmpty() -> Text("No media found. Check that the app may read photos, videos and music.")
-                        else -> LazyColumn(Modifier.heightIn(max = 360.dp)) {
-                            items(list, key = { it.path }) { folder ->
-                                val on = shareAll || folder.path in checked
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.fillMaxWidth().clickable(enabled = !shareAll) {
+                        list == null -> item { Text("Looking for media folders…") }
+                        list.isEmpty() -> item { Text("No media found. Check that the app may read photos, videos and music.") }
+                        else -> items(list, key = { it.path }) { folder ->
+                            // A ticked folder brings its subfolders along; those show as ticked and locked.
+                            val inherited = checked.any { it != folder.path && it.covers(folder.path) }
+                            val on = shareAll || inherited || folder.path in checked
+                            val enabled = !shareAll && !inherited
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(start = (folder.depth * 16).dp)
+                                    .clickable(enabled = enabled) {
                                         checked = if (on) checked - folder.path else checked + folder.path
                                     },
-                                ) {
-                                    Checkbox(checked = on, onCheckedChange = null, enabled = !shareAll)
-                                    Column(Modifier.padding(start = 8.dp)) {
-                                        Text(folder.path.trimEnd('/').ifEmpty { "(storage root)" })
-                                        Text("${folder.itemCount} file${if (folder.itemCount == 1) "" else "s"}", style = MaterialTheme.typography.bodySmall)
-                                    }
+                            ) {
+                                Checkbox(checked = on, onCheckedChange = null, enabled = enabled)
+                                Column(Modifier.padding(start = 8.dp)) {
+                                    Text(folder.path.trimEnd('/').substringAfterLast('/').ifEmpty { "(storage root)" })
+                                    Text(
+                                        "${folder.itemCount} file${if (folder.itemCount == 1) "" else "s"}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
                                 }
                             }
                         }
                     }
+                    item {
+                        HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                        Text("Other folders", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "Any folder, including hidden ones the gallery skips. Everything inside is shared.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    items(trees.toList(), key = { it }) { tree ->
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                            Text(MediaScanner.treeLabel(tree), Modifier.weight(1f))
+                            TextButton(onClick = { trees = trees - tree }) { Text("Remove") }
+                        }
+                    }
+                    item {
+                        TextButton(onClick = { pickTree.launch(null) }) { Text("Add folder…") }
+                    }
                 }
             },
-            confirmButton = { TextButton(onClick = { onSave(if (shareAll) null else checked) }) { Text("Save") } },
-            dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+            confirmButton = {
+                TextButton(onClick = {
+                    // Keep only the outermost ticked folders; their subfolders are included anyway.
+                    val outer = checked.filter { f -> checked.none { it != f && it.covers(f) } }.toSet()
+                    finish(SharedFolders(if (shareAll) null else outer, trees))
+                }) { Text("Save") }
+            },
+            dismissButton = { TextButton(onClick = { finish(null) }) { Text("Cancel") } },
         )
     }
 }

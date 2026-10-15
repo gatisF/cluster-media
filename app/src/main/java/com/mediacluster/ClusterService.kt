@@ -71,7 +71,7 @@ class ClusterService : Service() {
 
         val udn = "uuid:${UUID.nameUUIDFromBytes("mediacluster".toByteArray())}" // same on every phone: TV sees one server
         val cds = ContentDirectory(udn) { "MediaCluster (${index.snapshot.value.peers.size} phones)" }
-        server = PeerHttpServer(this, PORT, ::selfInfo, { localItems }, index, cds) { scanner.uriFor(it.kind, it.localId) }
+        server = PeerHttpServer(this, PORT, ::selfInfo, { localItems }, index, cds) { scanner.uriFor(it) }
         server.start(5_000, false)
 
         ssdp = SsdpServer(udn, { "http://${localIp()}:$PORT/dlna/device.xml" }, wifiInterface())
@@ -85,7 +85,7 @@ class ClusterService : Service() {
         discovery.start()
 
         scope.launch {
-            val folders = Cluster.folders(this@ClusterService).selected
+            val folders = Cluster.folders(this@ClusterService).shared
             while (isActive) {
                 val shared = folders.value
                 localItems = runCatching { scanner.scan(shared) }.getOrElse { Log.w(TAG, "Scan failed", it); emptyList() }
