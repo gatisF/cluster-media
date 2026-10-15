@@ -72,6 +72,7 @@ class MainActivity : ComponentActivity() {
     private fun LibraryScreen() {
         val snap by Cluster.index.snapshot.collectAsStateWithLifecycle()
         val shared by Cluster.folders(this).shared.collectAsStateWithLifecycle()
+        val webPage by Cluster.settings(this).webPage.collectAsStateWithLifecycle()
         var pickingFolders by remember { mutableStateOf(false) }
         Column(Modifier.padding(16.dp)) {
             Text("${snap.peers.size} phones in cluster", style = MaterialTheme.typography.headlineSmall)
@@ -82,6 +83,21 @@ class MainActivity : ComponentActivity() {
             Text("On your TV, open the media/DLNA source \"MediaCluster\".", style = MaterialTheme.typography.bodySmall)
             OutlinedButton(onClick = { pickingFolders = true }, modifier = Modifier.padding(vertical = 8.dp)) {
                 Text(sharingLabel(shared))
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.weight(1f)) {
+                    Text("Web page for browsers")
+                    val host = snap.peers[Cluster.peerId(this@MainActivity)]?.host
+                    Text(
+                        when {
+                            !webPage -> "Lets phones and laptops without the app watch in a browser"
+                            host == null -> "Starting…"
+                            else -> "Open http://$host:${ClusterService.PORT}/ on the same Wi-Fi"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Switch(checked = webPage, onCheckedChange = { Cluster.settings(this@MainActivity).setWebPage(it) })
             }
             LazyColumn {
                 items(snap.allItems, key = { it.id }) { item ->

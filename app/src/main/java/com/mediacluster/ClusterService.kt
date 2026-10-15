@@ -71,7 +71,8 @@ class ClusterService : Service() {
 
         val udn = "uuid:${UUID.nameUUIDFromBytes("mediacluster".toByteArray())}" // same on every phone: TV sees one server
         val cds = ContentDirectory(udn) { "MediaCluster (${index.snapshot.value.peers.size} phones)" }
-        server = PeerHttpServer(this, PORT, ::selfInfo, { localItems }, index, cds) { scanner.uriFor(it) }
+        val settings = Cluster.settings(this)
+        server = PeerHttpServer(this, PORT, ::selfInfo, { localItems }, index, cds, { settings.webPage.value }) { scanner.uriFor(it) }
         server.start(5_000, false)
 
         ssdp = SsdpServer(udn, { "http://${localIp()}:$PORT/dlna/device.xml" }, wifiInterface())
@@ -183,10 +184,16 @@ object Cluster {
     val index = ClusterIndex()
 
     @Volatile private var folderSelection: FolderSelection? = null
+    @Volatile private var appSettings: AppSettings? = null
 
     fun folders(context: Context): FolderSelection =
         folderSelection ?: synchronized(this) {
             folderSelection ?: FolderSelection(context).also { folderSelection = it }
+        }
+
+    fun settings(context: Context): AppSettings =
+        appSettings ?: synchronized(this) {
+            appSettings ?: AppSettings(context).also { appSettings = it }
         }
 
     fun peerId(context: Context): String {

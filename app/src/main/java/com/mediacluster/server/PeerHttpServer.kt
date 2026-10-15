@@ -15,6 +15,7 @@ import kotlinx.serialization.json.Json
  *  - /api/...   JSON used by other phones to build the shared library
  *  - /media/ID  the file itself, with HTTP Range support so TVs can seek
  *  - /dlna/...  UPnP MediaServer endpoints (only used on the leader phone)
+ *  - /          a web page of the whole library for browsers, when the user has turned it on
  */
 class PeerHttpServer(
     private val context: Context,
@@ -23,6 +24,7 @@ class PeerHttpServer(
     private val localItems: () -> List<MediaItem>,
     private val index: ClusterIndex,
     private val contentDirectory: ContentDirectory,
+    private val webPageEnabled: () -> Boolean,
     private val uriFor: (MediaItem) -> android.net.Uri,
 ) : NanoHTTPD(port) {
 
@@ -31,6 +33,8 @@ class PeerHttpServer(
     override fun serve(session: IHTTPSession): Response {
         val path = session.uri
         return when {
+            path == "/" && webPageEnabled() ->
+                newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", WebPage.render(index.snapshot.value))
             path == "/api/info" -> jsonResponse(json.encodeToString(selfInfo()))
             path == "/api/library" -> jsonResponse(json.encodeToString(localItems()))
             path.startsWith("/media/") -> serveMedia(session, path.removePrefix("/media/").toLongOrNull())
