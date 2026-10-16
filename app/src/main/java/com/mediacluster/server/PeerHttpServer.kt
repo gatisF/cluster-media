@@ -5,14 +5,17 @@ import android.os.ParcelFileDescriptor
 import com.mediacluster.dlna.ContentDirectory
 import com.mediacluster.library.ClusterIndex
 import com.mediacluster.library.MediaItem
+import com.mediacluster.library.MediaWriter
+import com.mediacluster.library.Uploader
 import com.mediacluster.library.PeerInfo
 import fi.iki.elonen.NanoHTTPD
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.io.InputStream
 
 /**
  * Every phone runs this server. It answers three kinds of request:
- *  - /api/...   JSON used by other phones to build the shared library
+ *  - /api/...   JSON used by other phones to build the shared library; POST /api/upload adds a file
  *  - /media/ID  the file itself, with HTTP Range support so TVs can seek
  *  - /dlna/...  UPnP MediaServer endpoints (only used on the leader phone)
  *  - /          a web page of the whole library for browsers, when the user has turned it on
@@ -25,6 +28,8 @@ class PeerHttpServer(
     private val index: ClusterIndex,
     private val contentDirectory: ContentDirectory,
     private val webPageEnabled: () -> Boolean,
+    private val onUpload: (name: String, mime: String?, length: Long, input: InputStream) -> Unit,
+    private val onRefresh: () -> Unit,
     private val uriFor: (MediaItem) -> android.net.Uri,
 ) : NanoHTTPD(port) {
 
@@ -35,6 +40,8 @@ class PeerHttpServer(
         return when {
             path == "/" && webPageEnabled() ->
                 newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", WebPage.render(index.snapshot.value))
+            path == "/api/upload" -> cors(session) ?: receiveUpload(session)
+            path == "/api/refresh" -> cors(session) ?: run { onRefresh(); withCors(newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, "")) }
             path == "/api/info" -> jsonResponse(json.encodeToString(selfInfo()))
             path == "/api/library" -> jsonResponse(json.encodeToString(localItems()))
             path.startsWith("/media/") -> serveMedia(session, path.removePrefix("/media/").toLongOrNull())
@@ -49,6 +56,42 @@ class PeerHttpServer(
             else -> newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Not found")
         }
     }
+
+    /**
+     * Body is the raw file; ?name= and ?mime= describe it. Browsers on the web page upload to whichever
+     * phone has the most room, which may be a different phone than the page came from, hence CORS.
+     */
+    private fun receiveUpload(session: IHTTPSession): Response {
+        if (session.method != Method.POST) return error(Response.Status.METHOD_NOT_ALLOWED, "Use POST")
+        val length = session.headers["content-length"]?.toLongOrNull()
+            ?: return error(Response.Status.LENGTH_REQUIRED, "Content-Length required")
+        val name = session.parameters["name"]?.firstOrNull() ?: "media"
+        val mime = session.parameters["mime"]?.firstOrNull()?.takeIf { it.isNotBlank() } ?: session.headers["content-type"]
+        if (length > selfInfo().freeBytes - Uploader.RESERVE_BYTES) return error(Response.Status.PAYLOAD_TOO_LARGE, "Not enough free space on this phone")
+        return try {
+            onUpload(name, mime, length, session.inputStream)
+            withCors(newFixedLengthResponse(Response.Status.CREATED, MIME_PLAINTEXT, "Added $name"))
+        } catch (e: MediaWriter.Rejected) {
+            error(Response.Status.UNSUPPORTED_MEDIA_TYPE, e.message ?: "Not media")
+        } catch (e: Exception) {
+            error(Response.Status.INTERNAL_ERROR, "Could not save $name: ${e.message}")
+        }
+    }
+
+    /** Answers a CORS preflight, or returns null for a normal request. */
+    private fun cors(session: IHTTPSession): Response? =
+        if (session.method != Method.OPTIONS) null
+        else withCors(newFixedLengthResponse(Response.Status.NO_CONTENT, MIME_PLAINTEXT, "")).apply {
+            addHeader("Access-Control-Allow-Methods", "POST, OPTIONS")
+            addHeader("Access-Control-Allow-Headers", "Content-Type")
+            addHeader("Access-Control-Max-Age", "600")
+        }
+
+    private fun withCors(r: Response) = r.apply { addHeader("Access-Control-Allow-Origin", "*") }
+
+    // The request body may be unread, so close the connection rather than parse leftovers as the next request.
+    private fun error(status: Response.Status, message: String) =
+        withCors(newFixedLengthResponse(status, MIME_PLAINTEXT, message)).apply { addHeader("Connection", "close") }
 
     private fun serveMedia(session: IHTTPSession, localId: Long?): Response {
         val item = localItems().firstOrNull { it.localId == localId }

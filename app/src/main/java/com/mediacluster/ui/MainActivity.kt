@@ -11,6 +11,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -20,6 +21,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.ListItem
@@ -38,6 +40,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.core.content.IntentCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mediacluster.Cluster
 import com.mediacluster.ClusterService
@@ -63,9 +66,26 @@ class MainActivity : ComponentActivity() {
                 Manifest.permission.READ_MEDIA_AUDIO,
                 Manifest.permission.READ_MEDIA_IMAGES,
                 Manifest.permission.POST_NOTIFICATIONS,
-            ) else arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+            ) else if (Build.VERSION.SDK_INT >= 29) arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+            else arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE)
         )
         setContent { MaterialTheme { Surface(Modifier.fillMaxSize()) { LibraryScreen() } } }
+        if (savedInstanceState == null) addShared(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        addShared(intent)
+    }
+
+    /** Media shared to the app from a gallery or file manager is added to the cluster. */
+    private fun addShared(intent: Intent?) {
+        val uris = when (intent?.action) {
+            Intent.ACTION_SEND -> listOfNotNull(IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java))
+            Intent.ACTION_SEND_MULTIPLE -> IntentCompat.getParcelableArrayListExtra(intent, Intent.EXTRA_STREAM, Uri::class.java).orEmpty()
+            else -> return
+        }
+        Cluster.uploader(this).add(uris)
     }
 
     @Composable
@@ -73,7 +93,11 @@ class MainActivity : ComponentActivity() {
         val snap by Cluster.index.snapshot.collectAsStateWithLifecycle()
         val shared by Cluster.folders(this).shared.collectAsStateWithLifecycle()
         val webPage by Cluster.settings(this).webPage.collectAsStateWithLifecycle()
+        val uploadStatus by Cluster.uploader(this).status.collectAsStateWithLifecycle()
         var pickingFolders by remember { mutableStateOf(false) }
+        val pickMedia = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+            Cluster.uploader(this@MainActivity).add(uris)
+        }
         Column(Modifier.padding(16.dp)) {
             Text("${snap.peers.size} phones in cluster", style = MaterialTheme.typography.headlineSmall)
             Text(
@@ -81,9 +105,11 @@ class MainActivity : ComponentActivity() {
                     Formatter.formatFileSize(this@MainActivity, snap.totalBytes),
             )
             Text("On your TV, open the media/DLNA source \"MediaCluster\".", style = MaterialTheme.typography.bodySmall)
-            OutlinedButton(onClick = { pickingFolders = true }, modifier = Modifier.padding(vertical = 8.dp)) {
-                Text(sharingLabel(shared))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(vertical = 8.dp)) {
+                OutlinedButton(onClick = { pickingFolders = true }) { Text(sharingLabel(shared)) }
+                Button(onClick = { pickMedia.launch(arrayOf("video/*", "audio/*", "image/*")) }) { Text("Add media") }
             }
+            uploadStatus?.let { Text(it, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(bottom = 8.dp)) }
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.weight(1f)) {
                     Text("Web page for browsers")

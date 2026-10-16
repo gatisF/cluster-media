@@ -21,13 +21,16 @@ import com.mediacluster.library.ClusterIndex
 import com.mediacluster.library.FolderSelection
 import com.mediacluster.library.MediaItem
 import com.mediacluster.library.MediaScanner
+import com.mediacluster.library.MediaWriter
 import com.mediacluster.library.PeerInfo
+import com.mediacluster.library.Uploader
 import com.mediacluster.server.PeerHttpServer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -72,7 +75,13 @@ class ClusterService : Service() {
         val udn = "uuid:${UUID.nameUUIDFromBytes("mediacluster".toByteArray())}" // same on every phone: TV sees one server
         val cds = ContentDirectory(udn) { "MediaCluster (${index.snapshot.value.peers.size} phones)" }
         val settings = Cluster.settings(this)
-        server = PeerHttpServer(this, PORT, ::selfInfo, { localItems }, index, cds, { settings.webPage.value }) { scanner.uriFor(it) }
+        val writer = MediaWriter(this)
+        server = PeerHttpServer(
+            this, PORT, ::selfInfo, { localItems }, index, cds,
+            webPageEnabled = { settings.webPage.value },
+            onUpload = { name, mime, length, input -> receive(writer, name, mime, length, input) },
+            onRefresh = Cluster::requestRescan,
+        ) { scanner.uriFor(it) }
         server.start(5_000, false)
 
         ssdp = SsdpServer(udn, { "http://${localIp()}:$PORT/dlna/device.xml" }, wifiInterface())
@@ -85,18 +94,29 @@ class ClusterService : Service() {
         )
         discovery.start()
 
+        val folders = Cluster.folders(this).shared
+        scope.launch { folders.drop(1).collect { Cluster.requestRescan() } }
         scope.launch {
-            val folders = Cluster.folders(this@ClusterService).shared
             while (isActive) {
                 val shared = folders.value
                 localItems = runCatching { scanner.scan(shared) }.getOrElse { Log.w(TAG, "Scan failed", it); emptyList() }
                 index.put(selfInfo(), localItems)
                 knownPeers.keys.forEach { refreshPeer(it) }
                 updateLeadership()
-                // Rescan on the regular tick, or straight away when the user changes which folders are shared.
-                withTimeoutOrNull(REFRESH_MS) { folders.first { it != shared } }
+                // Rescan on the regular tick, or straight away when shared folders change or media is added.
+                withTimeoutOrNull(REFRESH_MS) { Cluster.rescanRequests.receive() }
             }
         }
+    }
+
+    /** Stores media another phone or a browser added, and makes sure its folder is shared. */
+    private fun receive(writer: MediaWriter, name: String, mime: String?, length: Long, input: java.io.InputStream) {
+        val kind = writer.save(name, mime, length, input)
+        val selection = Cluster.folders(this)
+        val current = selection.shared.value
+        val folder = writer.folderFor(kind)
+        if (!current.includes(folder)) selection.set(current.copy(mediaFolders = current.mediaFolders.orEmpty() + folder))
+        Cluster.requestRescan()
     }
 
     private fun refreshPeer(id: String) {
@@ -185,6 +205,19 @@ object Cluster {
 
     @Volatile private var folderSelection: FolderSelection? = null
     @Volatile private var appSettings: AppSettings? = null
+    @Volatile private var uploader: Uploader? = null
+
+    /** Wakes the service's scan loop early: rescan this phone and refresh every peer. */
+    val rescanRequests = Channel<Unit>(Channel.CONFLATED)
+
+    fun requestRescan() {
+        rescanRequests.trySend(Unit)
+    }
+
+    fun uploader(context: Context): Uploader =
+        uploader ?: synchronized(this) {
+            uploader ?: Uploader(context).also { uploader = it }
+        }
 
     fun folders(context: Context): FolderSelection =
         folderSelection ?: synchronized(this) {

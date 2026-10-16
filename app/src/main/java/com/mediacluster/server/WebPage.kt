@@ -4,6 +4,7 @@ import com.mediacluster.dlna.ContentDirectory.Companion.esc
 import com.mediacluster.library.ClusterIndex
 import com.mediacluster.library.MediaItem
 import com.mediacluster.library.MediaKind
+import com.mediacluster.library.Uploader
 import com.mediacluster.library.mediaUrl
 
 /**
@@ -30,6 +31,10 @@ h1 { font-size:20px; margin:0; } .sub { color:var(--muted); font-size:14px; }
 nav { display:flex; gap:8px; margin-top:10px; }
 nav button { border:1px solid var(--line); background:none; color:var(--fg); padding:6px 12px; border-radius:16px; font:inherit; font-size:14px; }
 nav button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+.top { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+.add { background:var(--accent); color:#fff; border-radius:16px; padding:6px 14px; font-size:14px; cursor:pointer; white-space:nowrap; }
+.add input { display:none; }
+#upload { font-size:14px; margin-top:6px; overflow-wrap:anywhere; }
 main { padding:8px 16px 32px; }
 .row { display:flex; justify-content:space-between; gap:12px; padding:10px 0; border-bottom:1px solid var(--line); cursor:pointer; }
 .row:hover .t { color:var(--accent); } .t { overflow-wrap:anywhere; } .m { color:var(--muted); font-size:13px; white-space:nowrap; }
@@ -39,8 +44,11 @@ main { padding:8px 16px 32px; }
 .empty { color:var(--muted); padding:24px 0; }
 </style></head><body>
 <header>
+<div class="top"><div>
 <h1>MediaCluster</h1>
 <div class="sub">${snap.peers.size} phone${plural(snap.peers.size)} · $count file${plural(count)}</div>
+</div><label class="add">Add media<input id="files" type="file" multiple accept="video/*,audio/*,image/*"></label></div>
+<div id="upload" class="sub"></div>
 <div id="player"></div><div id="now" class="sub"></div>
 <nav>
 <button data-tab="VIDEO" class="on">Videos</button><button data-tab="AUDIO">Music</button><button data-tab="IMAGE">Photos</button>
@@ -52,6 +60,32 @@ ${section(snap, MediaKind.AUDIO, "No music shared yet.")}
 ${section(snap, MediaKind.IMAGE, "No photos shared yet.")}
 </main>
 <script>
+const peers = ${peersJson(snap)};
+const RESERVE = ${Uploader.RESERVE_BYTES};
+const say = t => document.getElementById('upload').textContent = t;
+// Each file goes to the phone with the most free space, like "Add media" in the app.
+function send(file, label) {
+  const target = peers.filter(p => p.free - RESERVE > file.size).sort((a, b) => b.free - a.free)[0];
+  if (!target) return Promise.reject(new Error(file.name + ': no phone has room'));
+  return new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest();
+    x.open('POST', target.base + '/api/upload?name=' + encodeURIComponent(file.name) + '&mime=' + encodeURIComponent(file.type));
+    x.upload.onprogress = e => e.lengthComputable && say(label + file.name + ' to ' + target.name + '… ' + Math.floor(e.loaded * 100 / e.total) + '%');
+    x.onload = () => x.status < 300 ? (target.free -= file.size, resolve()) : reject(new Error(file.name + ': ' + (x.responseText || x.status)));
+    x.onerror = () => reject(new Error(file.name + ': connection failed'));
+    x.send(file);
+  });
+}
+document.getElementById('files').onchange = async e => {
+  const files = [...e.target.files]; let added = 0; const failed = [];
+  for (const [i, f] of files.entries()) {
+    try { await send(f, 'Adding ' + (files.length > 1 ? (i + 1) + ' of ' + files.length + ': ' : '')); added++; }
+    catch (err) { failed.push(err.message); }
+  }
+  e.target.value = '';
+  say('Added ' + added + ' file' + (added === 1 ? '' : 's') + (failed.length ? '. Not added: ' + failed.join('; ') : '. Refreshing…'));
+  if (added) { await fetch('/api/refresh', { method: 'POST' }).catch(() => {}); setTimeout(() => location.reload(), failed.length ? 8000 : 2500); }
+};
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   document.querySelectorAll('nav button').forEach(x => x.classList.toggle('on', x === b));
   document.querySelectorAll('main > section').forEach(s => s.hidden = s.id !== b.dataset.tab);
@@ -87,6 +121,11 @@ document.querySelectorAll('.row').forEach(r => r.onclick = () => {
             }.joinToString("")
         }
         return """<section id="$kind"$hidden>$body</section>"""
+    }
+
+    private fun peersJson(snap: ClusterIndex.Snapshot) = snap.peers.values.joinToString(",", "[", "]") { p ->
+        // esc() makes the name safe inside the inline <script> too: it removes < and quotes.
+        """{"name":"${esc(p.name).replace("\\", "")}","base":"http://${p.host}:${p.port}","free":${p.freeBytes}}"""
     }
 
     private fun url(snap: ClusterIndex.Snapshot, item: MediaItem) = snap.peers[item.peerId]?.mediaUrl(item)?.let(::esc)
