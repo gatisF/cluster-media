@@ -25,8 +25,8 @@ import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
 /**
- * Adds files the user picked to the cluster: each one is copied to the phone with the most free space
- * (which may be this one), where it lands in a "MediaCluster" folder and joins the shared library.
+ * Adds files the user picked to the cluster: each one is copied to the phone or network drive with the most
+ * free space (which may be this phone), where it lands in a "MediaCluster" folder and joins the shared library.
  */
 class Uploader(context: Context) {
     private val appContext = context.applicationContext
@@ -83,8 +83,8 @@ class Uploader(context: Context) {
         if (size < 0) throw IllegalStateException("$name: size unknown")
         val mime = resolver.getType(uri) ?: ""
 
-        val peers = Cluster.index.snapshot.value.peers.values
-        val target = peers.filter { it.freeBytes - RESERVE_BYTES > size }.maxByOrNull { it.freeBytes }
+        val targets = Cluster.index.snapshot.value.storageTargets
+        val target = targets.filter { it.freeBytes - RESERVE_BYTES > size }.maxByOrNull { it.freeBytes }
             ?: throw IllegalStateException("$name: no phone has room")
 
         val body = object : RequestBody() {
@@ -110,8 +110,7 @@ class Uploader(context: Context) {
                 }
             }
         }
-        val url = "http://${target.host}:${target.port}/api/upload" +
-            "?name=${URLEncoder.encode(name, "UTF-8")}&mime=${URLEncoder.encode(mime, "UTF-8")}"
+        val url = target.uploadUrl + "name=${URLEncoder.encode(name, "UTF-8")}&mime=${URLEncoder.encode(mime, "UTF-8")}"
         http.newCall(Request.Builder().url(url).post(body).build()).execute().use { r ->
             if (!r.isSuccessful) throw IllegalStateException("$name: ${r.body?.string()?.takeIf { it.isNotBlank() } ?: "HTTP ${r.code}"}")
         }

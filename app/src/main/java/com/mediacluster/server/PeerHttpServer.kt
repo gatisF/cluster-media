@@ -1,10 +1,9 @@
 package com.mediacluster.server
 
-import android.content.Context
-import android.os.ParcelFileDescriptor
 import com.mediacluster.dlna.ContentDirectory
 import com.mediacluster.library.ClusterIndex
 import com.mediacluster.library.MediaItem
+import com.mediacluster.library.MediaSource
 import com.mediacluster.library.MediaWriter
 import com.mediacluster.library.Uploader
 import com.mediacluster.library.PeerInfo
@@ -21,16 +20,15 @@ import java.io.InputStream
  *  - /          a web page of the whole library for browsers, when the user has turned it on
  */
 class PeerHttpServer(
-    private val context: Context,
     port: Int,
     private val selfInfo: () -> PeerInfo,
     private val localItems: () -> List<MediaItem>,
     private val index: ClusterIndex,
     private val contentDirectory: ContentDirectory,
     private val webPageEnabled: () -> Boolean,
-    private val onUpload: (name: String, mime: String?, length: Long, input: InputStream) -> Unit,
+    private val onUpload: (name: String, mime: String?, length: Long, input: InputStream, driveId: String?) -> Unit,
     private val onRefresh: () -> Unit,
-    private val uriFor: (MediaItem) -> android.net.Uri,
+    private val open: (MediaItem) -> MediaSource?,
 ) : NanoHTTPD(port) {
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -67,9 +65,13 @@ class PeerHttpServer(
             ?: return error(Response.Status.LENGTH_REQUIRED, "Content-Length required")
         val name = session.parameters["name"]?.firstOrNull() ?: "media"
         val mime = session.parameters["mime"]?.firstOrNull()?.takeIf { it.isNotBlank() } ?: session.headers["content-type"]
-        if (length > selfInfo().freeBytes - Uploader.RESERVE_BYTES) return error(Response.Status.PAYLOAD_TOO_LARGE, "Not enough free space on this phone")
+        val driveId = session.parameters["drive"]?.firstOrNull()
+        val self = selfInfo()
+        val free = if (driveId == null) self.freeBytes
+        else self.drives.firstOrNull { it.id == driveId }?.freeBytes ?: return error(Response.Status.NOT_FOUND, "That drive is not connected through this phone")
+        if (length > free - Uploader.RESERVE_BYTES) return error(Response.Status.PAYLOAD_TOO_LARGE, "Not enough free space")
         return try {
-            onUpload(name, mime, length, session.inputStream)
+            onUpload(name, mime, length, session.inputStream, driveId)
             withCors(newFixedLengthResponse(Response.Status.CREATED, MIME_PLAINTEXT, "Added $name"))
         } catch (e: MediaWriter.Rejected) {
             error(Response.Status.UNSUPPORTED_MEDIA_TYPE, e.message ?: "Not media")
@@ -96,25 +98,23 @@ class PeerHttpServer(
     private fun serveMedia(session: IHTTPSession, localId: Long?): Response {
         val item = localItems().firstOrNull { it.localId == localId }
             ?: return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "No such file")
-        val pfd = context.contentResolver.openFileDescriptor(uriFor(item), "r")
+        // A phone file or a file on the network drive; either way NanoHTTPD closes the stream when done.
+        val source = runCatching { open(item) }.getOrNull()
             ?: return newFixedLengthResponse(Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "Cannot open")
-        val total = pfd.statSize
-        // Closing the stream also closes the descriptor once NanoHTTPD finishes sending.
-        val stream = ParcelFileDescriptor.AutoCloseInputStream(pfd)
+        val total = source.length
 
         val range = session.headers["range"]?.let(::parseRange)
         val response = if (range == null) {
-            newFixedLengthResponse(Response.Status.OK, item.mimeType, stream, total)
+            newFixedLengthResponse(Response.Status.OK, item.mimeType, source.openAt(0), total)
         } else {
             val start = range.first
             val end = (range.second ?: (total - 1)).coerceAtMost(total - 1)
             if (start >= total || start > end) {
-                stream.close()
+                source.openAt(0).close()
                 return newFixedLengthResponse(Response.Status.RANGE_NOT_SATISFIABLE, MIME_PLAINTEXT, "")
                     .apply { addHeader("Content-Range", "bytes */$total") }
             }
-            stream.channel.position(start)
-            newFixedLengthResponse(Response.Status.PARTIAL_CONTENT, item.mimeType, stream, end - start + 1)
+            newFixedLengthResponse(Response.Status.PARTIAL_CONTENT, item.mimeType, source.openAt(start), end - start + 1)
                 .apply { addHeader("Content-Range", "bytes $start-$end/$total") }
         }
         return response.apply {

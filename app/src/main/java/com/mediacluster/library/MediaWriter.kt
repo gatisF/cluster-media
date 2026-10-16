@@ -25,16 +25,24 @@ class MediaWriter(private val context: Context) {
         MediaKind.IMAGE -> Environment.DIRECTORY_PICTURES
     } + "/$FOLDER/"
 
-    /** Reads exactly [length] bytes from [input] into a new media file. Returns the kind of media saved. */
-    fun save(rawName: String, rawMime: String?, length: Long, input: InputStream): MediaKind {
+    /** An incoming file after its name is cleaned up and its type worked out. */
+    data class Incoming(val name: String, val mime: String, val kind: MediaKind)
+
+    /** Checks an incoming file; throws [Rejected] unless it is a photo, video or song. */
+    fun prepare(rawName: String, rawMime: String?): Incoming {
         val name = sanitize(rawName)
         // Senders often give a generic type (octet-stream, form data); then trust the file extension.
         val mime = rawMime?.substringBefore(';')?.trim()?.takeIf { kindOf(it) != null }
             ?: MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substringAfterLast('.', "").lowercase())
             ?: ""
         val kind = kindOf(mime) ?: throw Rejected("Only photos, videos and music can be added")
-        if (Build.VERSION.SDK_INT >= 29) saveViaMediaStore(name, mime, kind, length, input) else saveAsFile(name, mime, kind, length, input)
-        return kind
+        return Incoming(name, mime, kind)
+    }
+
+    /** Reads exactly [length] bytes from [input] into a new media file on this phone. */
+    fun save(file: Incoming, length: Long, input: InputStream) {
+        if (Build.VERSION.SDK_INT >= 29) saveViaMediaStore(file.name, file.mime, file.kind, length, input)
+        else saveAsFile(file.name, file.mime, file.kind, length, input)
     }
 
     private fun saveViaMediaStore(name: String, mime: String, kind: MediaKind, length: Long, input: InputStream) {

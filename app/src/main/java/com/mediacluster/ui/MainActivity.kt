@@ -20,6 +20,9 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
@@ -27,6 +30,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -36,20 +40,27 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.IntentCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mediacluster.Cluster
 import com.mediacluster.ClusterService
+import com.mediacluster.library.DriveConfig
 import com.mediacluster.library.MediaFolder
 import com.mediacluster.library.MediaScanner
+import com.mediacluster.library.NetworkDrive
+import com.mediacluster.library.explainDriveError
 import com.mediacluster.library.SharedFolders
 import com.mediacluster.library.covers
 import com.mediacluster.library.mediaUrl
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
@@ -94,12 +105,19 @@ class MainActivity : ComponentActivity() {
         val shared by Cluster.folders(this).shared.collectAsStateWithLifecycle()
         val webPage by Cluster.settings(this).webPage.collectAsStateWithLifecycle()
         val uploadStatus by Cluster.uploader(this).status.collectAsStateWithLifecycle()
+        val drive by Cluster.settings(this).drive.collectAsStateWithLifecycle()
+        val driveStatus by Cluster.driveStatus.collectAsStateWithLifecycle()
         var pickingFolders by remember { mutableStateOf(false) }
+        var editingDrive by remember { mutableStateOf(false) }
         val pickMedia = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
             Cluster.uploader(this@MainActivity).add(uris)
         }
         Column(Modifier.padding(16.dp)) {
-            Text("${snap.peers.size} phones in cluster", style = MaterialTheme.typography.headlineSmall)
+            val drives = snap.drives.size
+            Text(
+                "${snap.peers.size} phones" + (if (drives > 0) " + $drives drive${if (drives == 1) "" else "s"}" else "") + " in cluster",
+                style = MaterialTheme.typography.headlineSmall,
+            )
             Text(
                 "Pooled storage: ${Formatter.formatFileSize(this@MainActivity, snap.freeBytes)} free of " +
                     Formatter.formatFileSize(this@MainActivity, snap.totalBytes),
@@ -125,12 +143,23 @@ class MainActivity : ComponentActivity() {
                 }
                 Switch(checked = webPage, onCheckedChange = { Cluster.settings(this@MainActivity).setWebPage(it) })
             }
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.weight(1f)) {
+                    Text(drive?.name ?: "Router drive")
+                    Text(
+                        if (drive == null) "Add a USB disk plugged into your router to the cluster"
+                        else "${drive?.address}\n${driveStatus ?: "Starting…"}",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                TextButton(onClick = { editingDrive = true }) { Text(if (drive == null) "Set up" else "Change") }
+            }
             LazyColumn {
                 items(snap.allItems, key = { it.id }) { item ->
                     val peer = snap.peers[item.peerId]
                     ListItem(
                         headlineContent = { Text(item.title) },
-                        supportingContent = { Text("${peer?.name ?: "?"} · ${Formatter.formatFileSize(this@MainActivity, item.sizeBytes)}") },
+                        supportingContent = { Text("${snap.locationOf(item) ?: "?"} · ${Formatter.formatFileSize(this@MainActivity, item.sizeBytes)}") },
                         modifier = Modifier.clickable {
                             if (peer != null) startActivity(
                                 Intent(Intent.ACTION_VIEW).setDataAndType(Uri.parse(peer.mediaUrl(item)), item.mimeType)
@@ -144,6 +173,83 @@ class MainActivity : ComponentActivity() {
             Cluster.folders(this).set(it)
             pickingFolders = false
         }
+        if (editingDrive) DriveDialog(drive, onDismiss = { editingDrive = false }) {
+            Cluster.settings(this).setDrive(it)
+            editingDrive = false
+        }
+    }
+
+    /**
+     * Sets up the network drive this phone adds to the cluster: a disk shared over SMB,
+     * typically a USB drive on the router. Saving null removes it.
+     */
+    @Composable
+    private fun DriveDialog(current: DriveConfig?, onDismiss: () -> Unit, onSave: (DriveConfig?) -> Unit) {
+        var address by remember { mutableStateOf(current?.address ?: "") }
+        var user by remember { mutableStateOf(current?.user ?: "") }
+        var password by remember { mutableStateOf(current?.password ?: "") }
+        var name by remember { mutableStateOf(current?.name ?: "Router drive") }
+        var shares by remember { mutableStateOf<List<String>?>(null) }
+        var finding by remember { mutableStateOf<String?>(null) }
+        val scope = rememberCoroutineScope()
+        val parsed = DriveConfig.parse(address, user, password, name)
+        val hostOnly = DriveConfig.split(address)
+        fun findShares() {
+            val (host, port, _) = hostOnly ?: return
+            finding = "Looking for shared folders on $host…"
+            shares = null
+            scope.launch {
+                val result = withContext(Dispatchers.IO) { runCatching { NetworkDrive.listShares(host, port, user.trim(), password) } }
+                result.onSuccess { shares = it; finding = if (it.isEmpty()) "No shared folders found on $host" else null }
+                    .onFailure { finding = "Can't list folders: " + explainDriveError(it, user.isBlank(), host) }
+            }
+        }
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("Router drive") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.verticalScroll(rememberScrollState())) {
+                    Text(
+                        "Turn on file sharing (SMB) for the USB drive in your router's settings, then enter its address. " +
+                            "This phone indexes the drive and streams it to the cluster, so pick a phone that stays at home.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    OutlinedTextField(
+                        value = address, onValueChange = { address = it }, singleLine = true,
+                        label = { Text("Address") }, placeholder = { Text("\\\\192.168.1.1\\usb\\Media") },
+                        isError = address.isNotBlank() && parsed == null,
+                        supportingText = { Text("\\\\router\\share or \\\\router\\share\\folder. Only know the router's address? Enter it, add the login below and tap Find shared folders.") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                    )
+                    OutlinedTextField(
+                        value = user, onValueChange = { user = it }, singleLine = true,
+                        label = { Text("Username") }, supportingText = { Text("Leave empty for guest access") },
+                    )
+                    OutlinedTextField(
+                        value = password, onValueChange = { password = it }, singleLine = true,
+                        label = { Text("Password") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    )
+                    OutlinedTextField(value = name, onValueChange = { name = it }, singleLine = true, label = { Text("Name in the cluster") })
+                    TextButton(enabled = hostOnly != null, onClick = ::findShares) { Text("Find shared folders") }
+                    finding?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                    shares?.forEach { share ->
+                        val (host, port, _) = hostOnly ?: return@forEach
+                        TextButton(onClick = { address = "\\\\" + host + (if (port != 445) ":$port" else "") + "\\" + share }) {
+                            Text("\\\\$host\\$share")
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(enabled = parsed != null, onClick = { onSave(parsed) }) { Text("Save") } },
+            dismissButton = {
+                Row {
+                    if (current != null) TextButton(onClick = { onSave(null) }) { Text("Remove") }
+                    TextButton(onClick = onDismiss) { Text("Cancel") }
+                }
+            },
+        )
     }
 
     private fun sharingLabel(shared: SharedFolders): String {

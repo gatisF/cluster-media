@@ -12,27 +12,38 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Environment
 import android.os.IBinder
+import android.os.ParcelFileDescriptor
 import android.os.StatFs
+import android.text.format.Formatter
 import android.util.Log
 import com.mediacluster.discovery.PeerDiscovery
 import com.mediacluster.dlna.ContentDirectory
 import com.mediacluster.dlna.SsdpServer
 import com.mediacluster.library.ClusterIndex
+import com.mediacluster.library.DriveConfig
+import com.mediacluster.library.DriveInfo
 import com.mediacluster.library.FolderSelection
 import com.mediacluster.library.MediaItem
 import com.mediacluster.library.MediaScanner
+import com.mediacluster.library.MediaSource
 import com.mediacluster.library.MediaWriter
+import com.mediacluster.library.NetworkDrive
+import com.mediacluster.library.explainDriveError
 import com.mediacluster.library.PeerInfo
 import com.mediacluster.library.Uploader
 import com.mediacluster.server.PeerHttpServer
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
@@ -64,6 +75,12 @@ class ClusterService : Service() {
     private var multicastLock: WifiManager.MulticastLock? = null
     @Volatile private var localItems: List<MediaItem> = emptyList()
 
+    // The network drive this phone serves to the cluster, if the user set one up here.
+    @Volatile private var drive: NetworkDrive? = null
+    @Volatile private var driveItems: List<MediaItem> = emptyList()
+    @Volatile private var driveInfo: DriveInfo? = null
+    private val driveRescan = Channel<Unit>(Channel.CONFLATED)
+
     private val index get() = Cluster.index
 
     override fun onCreate() {
@@ -77,11 +94,11 @@ class ClusterService : Service() {
         val settings = Cluster.settings(this)
         val writer = MediaWriter(this)
         server = PeerHttpServer(
-            this, PORT, ::selfInfo, { localItems }, index, cds,
+            PORT, ::selfInfo, { localItems }, index, cds,
             webPageEnabled = { settings.webPage.value },
-            onUpload = { name, mime, length, input -> receive(writer, name, mime, length, input) },
-            onRefresh = Cluster::requestRescan,
-        ) { scanner.uriFor(it) }
+            onUpload = { name, mime, length, input, driveId -> receive(writer, name, mime, length, input, driveId) },
+            onRefresh = { Cluster.requestRescan(); driveRescan.trySend(Unit) },
+        ) { item -> if (item.driveId != null) drive?.takeIf { it.id == item.driveId }?.open(item) else phoneSource(item) }
         server.start(5_000, false)
 
         ssdp = SsdpServer(udn, { "http://${localIp()}:$PORT/dlna/device.xml" }, wifiInterface())
@@ -99,7 +116,7 @@ class ClusterService : Service() {
         scope.launch {
             while (isActive) {
                 val shared = folders.value
-                localItems = runCatching { scanner.scan(shared) }.getOrElse { Log.w(TAG, "Scan failed", it); emptyList() }
+                localItems = runCatching { scanner.scan(shared) }.getOrElse { Log.w(TAG, "Scan failed", it); emptyList() } + driveItems
                 index.put(selfInfo(), localItems)
                 knownPeers.keys.forEach { refreshPeer(it) }
                 updateLeadership()
@@ -107,14 +124,67 @@ class ClusterService : Service() {
                 withTimeoutOrNull(REFRESH_MS) { Cluster.rescanRequests.receive() }
             }
         }
+        scope.launch { settings.drive.collectLatest { config -> runDrive(config) } }
     }
 
-    /** Stores media another phone or a browser added, and makes sure its folder is shared. */
-    private fun receive(writer: MediaWriter, name: String, mime: String?, length: Long, input: java.io.InputStream) {
-        val kind = writer.save(name, mime, length, input)
+    /** Keeps the configured network drive indexed: on start, every few minutes, and after media is added to it. */
+    private suspend fun runDrive(config: DriveConfig?) {
+        drive?.close()
+        drive = null; driveItems = emptyList(); driveInfo = null
+        Cluster.requestRescan()
+        if (config == null) {
+            Cluster.driveStatus.value = null
+            return
+        }
+        val d = NetworkDrive(config, peerId).also { drive = it }
+        try {
+            while (true) {
+                if (driveInfo == null) Cluster.driveStatus.value = "Connecting to ${config.address}…"
+                try {
+                    val items = runInterruptible { d.scan() }
+                    val info = runInterruptible { d.info() }
+                    driveItems = items; driveInfo = info
+                    Cluster.driveStatus.value = "Connected · ${items.size} files · " +
+                        "${Formatter.formatFileSize(this, info.freeBytes)} free of ${Formatter.formatFileSize(this, info.totalBytes)}"
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "Network drive failed", e)
+                    driveItems = emptyList(); driveInfo = null
+                    Cluster.driveStatus.value = "Can't use the drive: ${explain(e, config)}"
+                }
+                Cluster.requestRescan()
+                withTimeoutOrNull(if (driveInfo == null) DRIVE_RETRY_MS else DRIVE_REFRESH_MS) { driveRescan.receive() }
+            }
+        } finally {
+            d.close()
+        }
+    }
+
+    /** Turns the common SMB failures into advice. */
+    private fun explain(e: Exception, config: DriveConfig): String = explainDriveError(e, config.user.isEmpty(), config.host, config.share, config.folder)
+
+    /** A file on this phone, opened for streaming. */
+    private fun phoneSource(item: MediaItem): MediaSource? {
+        val pfd = contentResolver.openFileDescriptor(scanner.uriFor(item), "r") ?: return null
+        // Closing the stream also closes the descriptor once the server finishes sending.
+        return MediaSource(pfd.statSize) { offset -> ParcelFileDescriptor.AutoCloseInputStream(pfd).also { it.channel.position(offset) } }
+    }
+
+    /** Stores media another phone or a browser added, on this phone or on its network drive. */
+    private fun receive(writer: MediaWriter, name: String, mime: String?, length: Long, input: java.io.InputStream, driveId: String?) {
+        val file = writer.prepare(name, mime)
+        if (driveId != null) {
+            val d = drive?.takeIf { it.id == driveId } ?: throw IllegalStateException("That drive is not connected through this phone")
+            d.save(file, length, input)
+            driveRescan.trySend(Unit)
+            return
+        }
+        writer.save(file, length, input)
+        // Make sure the folder it landed in is shared, or the new file would stay invisible.
         val selection = Cluster.folders(this)
         val current = selection.shared.value
-        val folder = writer.folderFor(kind)
+        val folder = writer.folderFor(file.kind)
         if (!current.includes(folder)) selection.set(current.copy(mediaFolders = current.mediaFolders.orEmpty() + folder))
         Cluster.requestRescan()
     }
@@ -154,6 +224,7 @@ class ClusterService : Service() {
             freeBytes = stat.availableBytes,
             totalBytes = stat.totalBytes,
             itemCount = localItems.size,
+            drives = listOfNotNull(driveInfo),
         )
     }
 
@@ -194,6 +265,8 @@ class ClusterService : Service() {
     companion object {
         const val PORT = 8765
         private const val REFRESH_MS = 30_000L
+        private const val DRIVE_REFRESH_MS = 10 * 60_000L
+        private const val DRIVE_RETRY_MS = 60_000L
         private const val CHANNEL = "cluster"
         private const val TAG = "ClusterService"
     }
@@ -206,6 +279,9 @@ object Cluster {
     @Volatile private var folderSelection: FolderSelection? = null
     @Volatile private var appSettings: AppSettings? = null
     @Volatile private var uploader: Uploader? = null
+
+    /** What the network drive set up on this phone is doing, for the UI; null when there is none. */
+    val driveStatus = MutableStateFlow<String?>(null)
 
     /** Wakes the service's scan loop early: rescan this phone and refresh every peer. */
     val rescanRequests = Channel<Unit>(Channel.CONFLATED)

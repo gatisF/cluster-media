@@ -46,7 +46,7 @@ main { padding:8px 16px 32px; }
 <header>
 <div class="top"><div>
 <h1>MediaCluster</h1>
-<div class="sub">${snap.peers.size} phone${plural(snap.peers.size)} · $count file${plural(count)}</div>
+<div class="sub">${snap.peers.size} phone${plural(snap.peers.size)}${drivesLabel(snap)} · $count file${plural(count)}</div>
 </div><label class="add">Add media<input id="files" type="file" multiple accept="video/*,audio/*,image/*"></label></div>
 <div id="upload" class="sub"></div>
 <div id="player"></div><div id="now" class="sub"></div>
@@ -60,16 +60,16 @@ ${section(snap, MediaKind.AUDIO, "No music shared yet.")}
 ${section(snap, MediaKind.IMAGE, "No photos shared yet.")}
 </main>
 <script>
-const peers = ${peersJson(snap)};
+const targets = ${targetsJson(snap)};
 const RESERVE = ${Uploader.RESERVE_BYTES};
 const say = t => document.getElementById('upload').textContent = t;
-// Each file goes to the phone with the most free space, like "Add media" in the app.
+// Each file goes to the phone or network drive with the most free space, like "Add media" in the app.
 function send(file, label) {
-  const target = peers.filter(p => p.free - RESERVE > file.size).sort((a, b) => b.free - a.free)[0];
+  const target = targets.filter(p => p.free - RESERVE > file.size).sort((a, b) => b.free - a.free)[0];
   if (!target) return Promise.reject(new Error(file.name + ': no phone has room'));
   return new Promise((resolve, reject) => {
     const x = new XMLHttpRequest();
-    x.open('POST', target.base + '/api/upload?name=' + encodeURIComponent(file.name) + '&mime=' + encodeURIComponent(file.type));
+    x.open('POST', target.url + 'name=' + encodeURIComponent(file.name) + '&mime=' + encodeURIComponent(file.type));
     x.upload.onprogress = e => e.lengthComputable && say(label + file.name + ' to ' + target.name + '… ' + Math.floor(e.loaded * 100 / e.total) + '%');
     x.onload = () => x.status < 300 ? (target.free -= file.size, resolve()) : reject(new Error(file.name + ': ' + (x.responseText || x.status)));
     x.onerror = () => reject(new Error(file.name + ': connection failed'));
@@ -115,7 +115,7 @@ document.querySelectorAll('.row').forEach(r => r.onclick = () => {
                 val url = url(snap, item) ?: return@mapNotNull null
                 val meta = listOfNotNull(
                     item.durationMs.takeIf { it > 0 }?.let(::duration),
-                    snap.peers[item.peerId]?.name?.let(::esc),
+                    snap.locationOf(item)?.let(::esc),
                 ).joinToString(" · ")
                 """<div class="row" data-kind="$kind" data-src="$url"><span class="t">${esc(item.title)}</span><span class="m">$meta</span></div>"""
             }.joinToString("")
@@ -123,10 +123,13 @@ document.querySelectorAll('.row').forEach(r => r.onclick = () => {
         return """<section id="$kind"$hidden>$body</section>"""
     }
 
-    private fun peersJson(snap: ClusterIndex.Snapshot) = snap.peers.values.joinToString(",", "[", "]") { p ->
+    private fun targetsJson(snap: ClusterIndex.Snapshot) = snap.storageTargets.joinToString(",", "[", "]") { t ->
         // esc() makes the name safe inside the inline <script> too: it removes < and quotes.
-        """{"name":"${esc(p.name).replace("\\", "")}","base":"http://${p.host}:${p.port}","free":${p.freeBytes}}"""
+        """{"name":"${esc(t.name).replace("\\", "")}","url":"${t.uploadUrl}","free":${t.freeBytes}}"""
     }
+
+    private fun drivesLabel(snap: ClusterIndex.Snapshot) =
+        snap.drives.size.let { if (it == 0) "" else " + $it drive${plural(it)}" }
 
     private fun url(snap: ClusterIndex.Snapshot, item: MediaItem) = snap.peers[item.peerId]?.mediaUrl(item)?.let(::esc)
 
