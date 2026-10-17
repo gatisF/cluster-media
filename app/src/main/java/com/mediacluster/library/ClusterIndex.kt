@@ -5,6 +5,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 
+/** A phone or network drive, as offered in the "filter by device" choices. */
+data class Device(val id: String, val name: String, val itemCount: Int)
+
 /** The merged library: every online phone and the files it holds. */
 class ClusterIndex {
     data class Snapshot(
@@ -38,6 +41,16 @@ class ClusterIndex {
 
         /** The phone with the smallest id hosts the DLNA server, so the TV sees one library, not one per phone. */
         val leaderId: String? get() = peers.keys.minOrNull()
+
+        /** The device a file is on, for filtering: its network drive, or else its phone. */
+        fun deviceOf(item: MediaItem): String = item.driveId ?: item.peerId
+
+        /** Every device in the cluster (phones by name, then drives) with how many files it shares. */
+        val devices: List<Device> get() {
+            val counts = allItems.groupingBy(::deviceOf).eachCount()
+            return peers.values.sortedBy { it.name.lowercase() }.map { Device(it.peerId, it.name, counts[it.peerId] ?: 0) } +
+                drives.values.map { (d, _) -> Device(d.id, d.name, counts[d.id] ?: 0) }.sortedBy { it.name.lowercase() }
+        }
 
         fun itemsOfKind(kind: MediaKind) = allItems.filter { it.kind == kind }
         fun find(id: String) = items.values.asSequence().flatten().firstOrNull { it.id == id }

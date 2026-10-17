@@ -23,12 +23,14 @@ object WebPage {
 :root { color-scheme: light dark; --bg:#fff; --fg:#1b1b1f; --muted:#666; --line:#e3e3e8; --accent:#3b5bdb; }
 @media (prefers-color-scheme: dark) { :root { --bg:#121216; --fg:#e8e8ee; --muted:#9a9aa6; --line:#2a2a33; --accent:#8ea2ff; } }
 * { box-sizing: border-box; }
+[hidden] { display:none !important; }
 body { margin:0; font:16px/1.4 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
 header { position:sticky; top:0; background:var(--bg); border-bottom:1px solid var(--line); padding:12px 16px; z-index:1; }
 h1 { font-size:20px; margin:0; } .sub { color:var(--muted); font-size:14px; }
 #player { display:none; margin-top:10px; } #player video, #player audio { width:100%; max-height:60vh; background:#000; }
 #now { font-size:14px; margin-top:4px; }
-nav { display:flex; gap:8px; margin-top:10px; }
+nav { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+nav select { border:1px solid var(--line); background:var(--bg); color:var(--fg); padding:6px 10px; border-radius:16px; font:inherit; font-size:14px; max-width:100%; }
 nav button { border:1px solid var(--line); background:none; color:var(--fg); padding:6px 12px; border-radius:16px; font:inherit; font-size:14px; }
 nav button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
 .top { display:flex; justify-content:space-between; align-items:center; gap:12px; }
@@ -52,6 +54,7 @@ main { padding:8px 16px 32px; }
 <div id="player"></div><div id="now" class="sub"></div>
 <nav>
 <button data-tab="VIDEO" class="on">Videos</button><button data-tab="AUDIO">Music</button><button data-tab="IMAGE">Photos</button>
+${deviceSelect(snap)}
 </nav>
 </header>
 <main>
@@ -90,6 +93,21 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   document.querySelectorAll('nav button').forEach(x => x.classList.toggle('on', x === b));
   document.querySelectorAll('main > section').forEach(s => s.hidden = s.id !== b.dataset.tab);
 });
+// Filter by device: hide files from other phones and drives; remember the choice in this browser.
+const dev = document.getElementById('dev');
+function filterDevice() {
+  const d = dev ? dev.value : '';
+  document.querySelectorAll('[data-dev]').forEach(el => el.hidden = d !== '' && el.dataset.dev !== d);
+  document.querySelectorAll('main > section').forEach(s => {
+    const none = s.querySelector('.none');
+    if (none) none.hidden = !!s.querySelector('[data-dev]:not([hidden])') || !s.querySelector('[data-dev]');
+  });
+}
+if (dev) {
+  try { const saved = localStorage.getItem('device'); if (saved && [...dev.options].some(o => o.value === saved)) dev.value = saved; } catch (e) {}
+  dev.onchange = () => { try { localStorage.setItem('device', dev.value); } catch (e) {} filterDevice(); };
+  filterDevice();
+}
 document.querySelectorAll('.row').forEach(r => r.onclick = () => {
   const p = document.getElementById('player');
   const el = document.createElement(r.dataset.kind === 'AUDIO' ? 'audio' : 'video');
@@ -109,7 +127,7 @@ document.querySelectorAll('.row').forEach(r => r.onclick = () => {
             items.isEmpty() -> """<p class="empty">$emptyText</p>"""
             kind == MediaKind.IMAGE -> items.mapNotNull { item ->
                 val url = url(snap, item) ?: return@mapNotNull null
-                """<a href="$url" target="_blank"><img loading="lazy" src="$url" alt="${esc(item.title)}"></a>"""
+                """<a href="$url" target="_blank" data-dev="${esc(snap.deviceOf(item))}"><img loading="lazy" src="$url" alt="${esc(item.title)}"></a>"""
             }.joinToString("", """<div class="grid">""", "</div>")
             else -> items.mapNotNull { item ->
                 val url = url(snap, item) ?: return@mapNotNull null
@@ -117,10 +135,20 @@ document.querySelectorAll('.row').forEach(r => r.onclick = () => {
                     item.durationMs.takeIf { it > 0 }?.let(::duration),
                     snap.locationOf(item)?.let(::esc),
                 ).joinToString(" · ")
-                """<div class="row" data-kind="$kind" data-src="$url"><span class="t">${esc(item.title)}</span><span class="m">$meta</span></div>"""
+                """<div class="row" data-kind="$kind" data-dev="${esc(snap.deviceOf(item))}" data-src="$url"><span class="t">${esc(item.title)}</span><span class="m">$meta</span></div>"""
             }.joinToString("")
         }
-        return """<section id="$kind"$hidden>$body</section>"""
+        val none = """<p class="empty none" hidden>Nothing here from this device.</p>"""
+        return """<section id="$kind"$hidden>$body$none</section>"""
+    }
+
+    /** A device picker, shown once the cluster has more than one phone or drive. */
+    private fun deviceSelect(snap: ClusterIndex.Snapshot): String {
+        val devices = snap.devices
+        if (devices.size < 2) return ""
+        return devices.joinToString("", """<select id="dev" aria-label="Device"><option value="">All devices</option>""", "</select>") {
+            """<option value="${esc(it.id)}">${esc(it.name)} (${it.itemCount})</option>"""
+        }
     }
 
     private fun targetsJson(snap: ClusterIndex.Snapshot) = snap.storageTargets.joinToString(",", "[", "]") { t ->

@@ -40,4 +40,5 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     // SMB client for network drives such as a USB disk on the router; speaks SMB1 too, which many routers still need
     implementation("eu.agno3.jcifs:jcifs-ng:2.1.10")
+    testImplementation("junit:junit:4.13.2")
 }

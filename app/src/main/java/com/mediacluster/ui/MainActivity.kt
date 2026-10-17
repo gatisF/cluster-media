@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -26,6 +27,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
@@ -40,6 +42,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -109,6 +112,7 @@ class MainActivity : ComponentActivity() {
         val driveStatus by Cluster.driveStatus.collectAsStateWithLifecycle()
         var pickingFolders by remember { mutableStateOf(false) }
         var editingDrive by remember { mutableStateOf(false) }
+        var device by rememberSaveable { mutableStateOf<String?>(null) }
         val pickMedia = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
             Cluster.uploader(this@MainActivity).add(uris)
         }
@@ -154,8 +158,29 @@ class MainActivity : ComponentActivity() {
                 }
                 TextButton(onClick = { editingDrive = true }) { Text(if (drive == null) "Set up" else "Change") }
             }
+            val devices = snap.devices
+            // A device that left the cluster can't stay selected.
+            val shownDevice = device?.takeIf { id -> devices.any { it.id == id } }
+            if (devices.size > 1) {
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
+                    item {
+                        FilterChip(selected = shownDevice == null, onClick = { device = null }, label = { Text("All devices") })
+                    }
+                    items(devices, key = { it.id }) { d ->
+                        FilterChip(
+                            selected = shownDevice == d.id,
+                            onClick = { device = if (shownDevice == d.id) null else d.id },
+                            label = { Text("${d.name} (${d.itemCount})") },
+                        )
+                    }
+                }
+            }
+            val shownItems = if (shownDevice == null) snap.allItems else snap.allItems.filter { snap.deviceOf(it) == shownDevice }
+            if (shownDevice != null && shownItems.isEmpty()) {
+                Text("Nothing shared from this device.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 12.dp))
+            }
             LazyColumn {
-                items(snap.allItems, key = { it.id }) { item ->
+                items(shownItems, key = { it.id }) { item ->
                     val peer = snap.peers[item.peerId]
                     ListItem(
                         headlineContent = { Text(item.title) },
