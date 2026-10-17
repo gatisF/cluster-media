@@ -1,11 +1,13 @@
 package com.mediacluster.library
 
+import android.util.Log
 import android.webkit.MimeTypeMap
 import jcifs.CIFSContext
 import jcifs.config.PropertyConfiguration
 import jcifs.context.BaseContext
 import jcifs.internal.AllocInfo
 import jcifs.smb.NtlmPasswordAuthenticator
+import jcifs.smb.SmbAuthException
 import jcifs.smb.SmbFile
 import kotlinx.serialization.Serializable
 import java.io.InputStream
@@ -56,7 +58,9 @@ fun explainDriveError(e: Throwable, guest: Boolean, host: String, share: String?
     return when {
         guest && ("logon failure" in text || "access is denied" in text || "access denied" in text) ->
             "the router wants a username and password (often the router's own login)"
-        "logon failure" in text || "password" in text -> "wrong username or password"
+        "plain text password" in text -> "the router asks for plain-text passwords, which is not supported"
+        "logon failure" in text || "bad password" in text ->
+            "wrong username or password. Use an account from the router's USB sharing page, not the Wi-Fi password"
         "access is denied" in text || "access denied" in text -> "this user may not open it"
         "network name cannot be found" in text || "bad_network_name" in text -> "no shared folder called \"$share\" on $host"
         "cannot find the" in text || "not found" in text -> "folder \"$folder\" not found on the drive"
@@ -76,7 +80,13 @@ class MediaSource(val length: Long, val openAt: (offset: Long) -> InputStream)
  */
 class NetworkDrive(val config: DriveConfig, private val peerId: String) : AutoCloseable {
 
-    private val context: CIFSContext = contextFor(config.user, config.password)
+    @Volatile private var ctx: CIFSContext? = null
+
+    /** Logs in on first use, with the first login method the server accepts. */
+    private val context: CIFSContext
+        get() = ctx ?: synchronized(this) {
+            ctx ?: firstWorkingLogin(config.user, config.password) { SmbFile(config.url, it).use { f -> f.listFiles() } }.also { ctx = it }
+        }
 
     /** localId -> smb:// URL, for files found by the last [scan]. */
     @Volatile private var urls: Map<Long, String> = emptyMap()
@@ -90,7 +100,15 @@ class NetworkDrive(val config: DriveConfig, private val peerId: String) : AutoCl
     }
 
     /** Every photo, video and song in the shared folder and below. */
-    fun scan(): List<MediaItem> {
+    fun scan(): List<MediaItem> = try {
+        scanAll()
+    } catch (e: SmbAuthException) {
+        // The password may have changed on the router: log in again next time.
+        synchronized(this) { ctx?.let { runCatching { it.close() } }; ctx = null }
+        throw e
+    }
+
+    private fun scanAll(): List<MediaItem> {
         val out = mutableListOf<MediaItem>()
         val found = HashMap<Long, String>()
         val pending = ArrayDeque(listOf(config.url))
@@ -183,7 +201,7 @@ class NetworkDrive(val config: DriveConfig, private val peerId: String) : AutoCl
     }
 
     override fun close() {
-        runCatching { context.close() }
+        ctx?.let { runCatching { it.close() } }
     }
 
     /** jcifs-ng only exposes free space; ask for the full allocation info, which includes capacity. */
@@ -208,16 +226,29 @@ class NetworkDrive(val config: DriveConfig, private val peerId: String) : AutoCl
         -(UUID.nameUUIDFromBytes("$id:${url.lowercase()}".toByteArray()).mostSignificantBits and Long.MAX_VALUE) - 1
 
     companion object {
+        private const val TAG = "NetworkDrive"
         private const val MAX_FILES = 50_000
         private const val CHUNK = 256 * 1024
 
-        private fun contextFor(user: String, password: String): CIFSContext {
+        /**
+         * Ways to send the password, newest first. Router Samba builds (e.g. Huawei ONTs) often
+         * refuse NTLMv2 and answer "logon failure" even when the password is right.
+         */
+        private enum class Login(val lmCompatibility: Int, val extendedSecurity: Boolean) {
+            NTLMV2(3, true),
+            NTLMV1(1, true),
+            LEGACY(0, false),
+        }
+
+        private fun contextFor(user: String, password: String, login: Login): CIFSContext {
             val props = Properties().apply {
                 setProperty("jcifs.smb.client.minVersion", "SMB1") // routers often only speak SMB1
                 setProperty("jcifs.smb.client.maxVersion", "SMB210")
                 setProperty("jcifs.smb.client.responseTimeout", "30000")
                 setProperty("jcifs.smb.client.soTimeout", "60000")
                 setProperty("jcifs.resolveOrder", "DNS")
+                setProperty("jcifs.smb.lmCompatibility", login.lmCompatibility.toString())
+                setProperty("jcifs.smb.client.useExtendedSecurity", login.extendedSecurity.toString())
             }
             val base = BaseContext(PropertyConfiguration(props))
             if (user.isEmpty()) return base.withGuestCrendentials()
@@ -225,16 +256,36 @@ class NetworkDrive(val config: DriveConfig, private val peerId: String) : AutoCl
             return base.withCredentials(NtlmPasswordAuthenticator(domain, user.substringAfter('\\'), password))
         }
 
+        /** Tries each login method until [probe] gets past the login; returns that method's context. */
+        private fun firstWorkingLogin(user: String, password: String, probe: (CIFSContext) -> Unit): CIFSContext {
+            val methods = if (user.isEmpty()) listOf(Login.NTLMV2) else Login.entries
+            var refused: SmbAuthException? = null
+            for (method in methods) {
+                val c = contextFor(user, password, method)
+                try {
+                    probe(c)
+                    Log.i(TAG, "Logged in to the drive with $method")
+                    return c
+                } catch (e: SmbAuthException) {
+                    refused = e
+                    runCatching { c.close() }
+                } catch (e: Exception) {
+                    runCatching { c.close() }
+                    throw e
+                }
+            }
+            throw refused!!
+        }
+
         /** Names of the disk shares on [host], to help fill in the address. */
         fun listShares(host: String, port: Int, user: String, password: String): List<String> {
-            val ctx = contextFor(user, password)
-            try {
-                val url = "smb://$host" + (if (port != 445) ":$port" else "") + "/"
-                return SmbFile(url, ctx).use { root -> root.listFiles().map { it.name.trimEnd('/') } }
-                    .filterNot { it.endsWith("$") }
-            } finally {
-                runCatching { ctx.close() }
+            val url = "smb://$host" + (if (port != 445) ":$port" else "") + "/"
+            var names = emptyList<String>()
+            val c = firstWorkingLogin(user, password) { ctx ->
+                names = SmbFile(url, ctx).use { root -> root.listFiles().map { it.name.trimEnd('/') } }
             }
+            runCatching { c.close() }
+            return names.filterNot { it.endsWith("$") }
         }
 
         fun mimeOf(name: String): String =
