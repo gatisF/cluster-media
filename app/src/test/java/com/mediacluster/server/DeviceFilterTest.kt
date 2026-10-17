@@ -54,6 +54,8 @@ class DeviceFilterTest {
         assertTrue(html.contains("""data-dev="drive-1" data-src="http://192.168.8.11:8765/media/-4""""))
         assertTrue(html.contains("""<a href="http://192.168.8.10:8765/media/2" target="_blank" data-dev="a"><img loading="lazy" decoding="async" src="http://192.168.8.10:8765/thumb/2""""))
         assertFalse(html.contains("192.168.8.12:8765/media")) // the duplicate drive server is not used
+        // Videos, including drive videos, show a preview frame from the phone that serves them.
+        assertTrue(html.contains("""data-src="http://192.168.8.11:8765/media/-4"><img class="vt" loading="lazy" decoding="async" alt="" src="http://192.168.8.11:8765/thumb/-4""""))
         File("build/device-filter-page.html").writeText(html) // for checking the page by eye
     }
 

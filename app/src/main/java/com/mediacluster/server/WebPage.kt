@@ -40,7 +40,9 @@ nav button.on { background:var(--accent); border-color:var(--accent); color:#fff
 #upload { font-size:14px; margin-top:6px; overflow-wrap:anywhere; }
 main { padding:8px 16px 32px; }
 .row { display:flex; justify-content:space-between; gap:12px; padding:10px 0; border-bottom:1px solid var(--line); cursor:pointer; }
-.row:hover .t { color:var(--accent); } .t { overflow-wrap:anywhere; } .m { color:var(--muted); font-size:13px; white-space:nowrap; }
+.row { align-items:center; }
+.row:hover .t { color:var(--accent); } .t { overflow-wrap:anywhere; flex:1; } .m { color:var(--muted); font-size:13px; white-space:nowrap; }
+.vt { width:96px; aspect-ratio:16/9; object-fit:cover; border-radius:6px; background:var(--line); flex:none; }
 .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(110px, 1fr)); gap:6px; padding-top:8px; }
 .grid a { display:block; aspect-ratio:1; background:var(--line); }
 .grid img { width:100%; height:100%; object-fit:cover; display:block; }
@@ -113,6 +115,7 @@ document.querySelectorAll('.row').forEach(r => r.onclick = () => {
   const p = document.getElementById('player');
   const el = document.createElement(r.dataset.kind === 'AUDIO' ? 'audio' : 'video');
   el.controls = true; el.autoplay = true; el.src = r.dataset.src;
+  const thumb = r.querySelector('.vt'); if (thumb && thumb.style.visibility !== 'hidden') el.poster = thumb.src;
   p.replaceChildren(el); p.style.display = 'block';
   document.getElementById('now').textContent = r.querySelector('.t').textContent;
   window.scrollTo(0, 0);
@@ -138,7 +141,11 @@ document.querySelectorAll('.row').forEach(r => r.onclick = () => {
                     item.durationMs.takeIf { it > 0 }?.let(::duration),
                     snap.locationOf(item)?.let(::esc),
                 ).joinToString(" · ")
-                """<div class="row" data-kind="$kind" data-dev="${esc(snap.deviceOf(item))}" data-src="$url"><span class="t">${esc(item.title)}</span><span class="m">$meta</span></div>"""
+                // Videos get a small preview frame; it hides itself if the phone can't make one.
+                val thumb = if (kind == MediaKind.VIDEO) snap.peers[item.peerId]?.thumbUrl(item)?.let {
+                    """<img class="vt" loading="lazy" decoding="async" alt="" src="${esc(it)}" onerror="this.style.visibility='hidden'">"""
+                }.orEmpty() else ""
+                """<div class="row" data-kind="$kind" data-dev="${esc(snap.deviceOf(item))}" data-src="$url">$thumb<span class="t">${esc(item.title)}</span><span class="m">$meta</span></div>"""
             }.joinToString("")
         }
         val none = """<p class="empty none" hidden>Nothing here from this device.</p>"""

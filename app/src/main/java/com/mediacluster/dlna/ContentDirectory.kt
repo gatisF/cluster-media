@@ -118,7 +118,7 @@ class ContentDirectory(
         }
         val duration = if (m.durationMs > 0) """ duration="${formatDuration(m.durationMs)}"""" else ""
         // A small preview lets the TV show a photo grid without pulling every full-size original.
-        val hasPreview = m.kind == MediaKind.IMAGE || (m.kind == MediaKind.VIDEO && m.driveId == null)
+        val hasPreview = m.kind != MediaKind.AUDIO
         val art = if (hasPreview) "<upnp:albumArtURI>${esc(peer.thumbUrl(m))}</upnp:albumArtURI>" else ""
         return """<item id="${esc(m.id)}" parentID="${esc(parent)}" restricted="1">""" +
             "<dc:title>${esc(m.title)}</dc:title><upnp:class>$upnpClass</upnp:class>$art" +

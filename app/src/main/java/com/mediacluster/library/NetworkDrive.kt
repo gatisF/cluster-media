@@ -166,6 +166,26 @@ class NetworkDrive(val config: DriveConfig, private val peerId: String) : AutoCl
         }
     }
 
+    /** Random access to a drive file, for making previews (a video's decoder jumps around the file). */
+    fun reader(item: MediaItem): RandomReader? {
+        val url = urls[item.localId] ?: return null
+        val file = SmbFile(url, context)
+        val raf = file.openRandomAccess("r")
+        val size = raf.length()
+        return object : RandomReader {
+            override val length = size
+            @Synchronized
+            override fun readAt(position: Long, buf: ByteArray, off: Int, len: Int): Int {
+                raf.seek(position)
+                return raf.read(buf, off, len)
+            }
+            override fun close() {
+                runCatching { raf.close() }
+                file.close()
+            }
+        }
+    }
+
     /** Stores added media in MediaCluster/Videos, /Music or /Photos on the drive. */
     fun save(incoming: MediaWriter.Incoming, length: Long, input: InputStream) {
         val dirUrl = config.url + "${MediaWriter.FOLDER}/${subfolderFor(incoming.kind)}/"

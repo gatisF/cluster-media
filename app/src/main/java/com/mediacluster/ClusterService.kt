@@ -103,7 +103,7 @@ class ClusterService : Service() {
             open = { item -> if (item.driveId != null) drive?.takeIf { it.id == item.driveId }?.open(item) else phoneSource(item) },
             thumbnail = { item ->
                 if (item.driveId == null) thumbnails.get(item, scanner.uriFor(item), null)
-                else drive?.takeIf { it.id == item.driveId }?.let { d -> thumbnails.get(item, null) { d.open(item)!!.openAt(0) } }
+                else drive?.takeIf { it.id == item.driveId }?.let { d -> thumbnails.get(item, null) { d.reader(item)!! } }
             },
         )
         server.start(5_000, false)
