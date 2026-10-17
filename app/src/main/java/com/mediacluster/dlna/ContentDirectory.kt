@@ -4,6 +4,7 @@ import com.mediacluster.library.ClusterIndex
 import com.mediacluster.library.MediaItem
 import com.mediacluster.library.MediaKind
 import com.mediacluster.library.mediaUrl
+import com.mediacluster.library.thumbUrl
 
 /**
  * A minimal UPnP/DLNA MediaServer. Smart TVs (Samsung, LG, Sony, Android TV with VLC/Kodi)
@@ -116,8 +117,11 @@ class ContentDirectory(
             MediaKind.IMAGE -> "object.item.imageItem.photo"
         }
         val duration = if (m.durationMs > 0) """ duration="${formatDuration(m.durationMs)}"""" else ""
+        // A small preview lets the TV show a photo grid without pulling every full-size original.
+        val hasPreview = m.kind == MediaKind.IMAGE || (m.kind == MediaKind.VIDEO && m.driveId == null)
+        val art = if (hasPreview) "<upnp:albumArtURI>${esc(peer.thumbUrl(m))}</upnp:albumArtURI>" else ""
         return """<item id="${esc(m.id)}" parentID="${esc(parent)}" restricted="1">""" +
-            "<dc:title>${esc(m.title)}</dc:title><upnp:class>$upnpClass</upnp:class>" +
+            "<dc:title>${esc(m.title)}</dc:title><upnp:class>$upnpClass</upnp:class>$art" +
             """<res protocolInfo="http-get:*:${m.mimeType}:$DLNA_FEATURES" size="${m.sizeBytes}"$duration>""" +
             esc(peer.mediaUrl(m)) + "</res></item>"
     }

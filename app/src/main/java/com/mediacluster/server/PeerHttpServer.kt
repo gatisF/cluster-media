@@ -16,6 +16,7 @@ import java.io.InputStream
  * Every phone runs this server. It answers three kinds of request:
  *  - /api/...   JSON used by other phones to build the shared library; POST /api/upload adds a file
  *  - /media/ID  the file itself, with HTTP Range support so TVs can seek
+ *  - /thumb/ID  a small JPEG preview, for the web page's photo grid and TVs
  *  - /dlna/...  UPnP MediaServer endpoints (only used on the leader phone)
  *  - /          a web page of the whole library for browsers, when the user has turned it on
  */
@@ -29,6 +30,7 @@ class PeerHttpServer(
     private val onUpload: (name: String, mime: String?, length: Long, input: InputStream, driveId: String?) -> Unit,
     private val onRefresh: () -> Unit,
     private val open: (MediaItem) -> MediaSource?,
+    private val thumbnail: (MediaItem) -> ByteArray?,
 ) : NanoHTTPD(port) {
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -37,12 +39,15 @@ class PeerHttpServer(
         val path = session.uri
         return when {
             path == "/" && webPageEnabled() ->
+                // The library changes as phones come and go: always ask again (NanoHTTPD gzips text for us).
                 newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", WebPage.render(index.snapshot.value))
+                    .apply { addHeader("Cache-Control", "no-cache") }
             path == "/api/upload" -> cors(session) ?: receiveUpload(session)
             path == "/api/refresh" -> cors(session) ?: run { onRefresh(); withCors(newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, "")) }
             path == "/api/info" -> jsonResponse(json.encodeToString(selfInfo()))
             path == "/api/library" -> jsonResponse(json.encodeToString(localItems()))
             path.startsWith("/media/") -> serveMedia(session, path.removePrefix("/media/").toLongOrNull())
+            path.startsWith("/thumb/") -> serveThumbnail(session, path.removePrefix("/thumb/").toLongOrNull())
             path == "/dlna/device.xml" -> xml(contentDirectory.deviceDescription())
             path == "/dlna/cds.xml" -> xml(ContentDirectory.SCPD)
             path == "/dlna/cm.xml" -> xml(ContentDirectory.CM_SCPD)
@@ -95,9 +100,36 @@ class PeerHttpServer(
     private fun error(status: Response.Status, message: String) =
         withCors(newFixedLengthResponse(status, MIME_PLAINTEXT, message)).apply { addHeader("Connection", "close") }
 
+    private fun serveThumbnail(session: IHTTPSession, localId: Long?): Response {
+        val item = localItems().firstOrNull { it.localId == localId }
+            ?: return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "No such file")
+        val tag = "\"t${item.localId}-${item.sizeBytes}\""
+        notModified(session, tag)?.let { return it }
+        val jpeg = runCatching { thumbnail(item) }.getOrNull()
+            ?: return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "No preview")
+        return newFixedLengthResponse(Response.Status.OK, "image/jpeg", jpeg.inputStream(), jpeg.size.toLong())
+            .apply { cacheFor(this, tag, THUMB_MAX_AGE) }
+    }
+
+    /**
+     * Files are named by id and checked by size, so browsers may keep them: a revisit reuses the copy
+     * (or gets a tiny 304) instead of downloading every photo again.
+     */
+    private fun cacheFor(r: Response, tag: String, maxAge: Int) {
+        r.addHeader("Cache-Control", "private, max-age=$maxAge")
+        r.addHeader("ETag", tag)
+    }
+
+    private fun notModified(session: IHTTPSession, tag: String): Response? =
+        if (session.headers["if-none-match"]?.split(',')?.any { it.trim() == tag } == true)
+            newFixedLengthResponse(Response.Status.NOT_MODIFIED, MIME_PLAINTEXT, "").apply { addHeader("ETag", tag) }
+        else null
+
     private fun serveMedia(session: IHTTPSession, localId: Long?): Response {
         val item = localItems().firstOrNull { it.localId == localId }
             ?: return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "No such file")
+        val tag = "\"m${item.localId}-${item.sizeBytes}\""
+        notModified(session, tag)?.let { return it }
         // A phone file or a file on the network drive; either way NanoHTTPD closes the stream when done.
         val source = runCatching { open(item) }.getOrNull()
             ?: return newFixedLengthResponse(Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "Cannot open")
@@ -118,6 +150,7 @@ class PeerHttpServer(
                 .apply { addHeader("Content-Range", "bytes $start-$end/$total") }
         }
         return response.apply {
+            cacheFor(this, tag, MEDIA_MAX_AGE)
             addHeader("Accept-Ranges", "bytes")
             addHeader("transferMode.dlna.org", "Streaming")
             addHeader("contentFeatures.dlna.org", ContentDirectory.DLNA_FEATURES)
@@ -142,6 +175,11 @@ class PeerHttpServer(
             read += n
         }
         return String(buf, 0, read, Charsets.UTF_8)
+    }
+
+    private companion object {
+        const val MEDIA_MAX_AGE = 24 * 3600
+        const val THUMB_MAX_AGE = 7 * 24 * 3600
     }
 
     private fun jsonResponse(body: String) = newFixedLengthResponse(Response.Status.OK, "application/json", body)

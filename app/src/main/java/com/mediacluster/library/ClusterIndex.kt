@@ -18,15 +18,18 @@ class ClusterIndex {
          * Each network drive with the phone that serves it. If several phones joined the same drive,
          * the one with the smallest id serves it, so its files and space are counted once.
          */
-        val drives: Map<String, Pair<DriveInfo, PeerInfo>> get() =
+        val drives: Map<String, Pair<DriveInfo, PeerInfo>> by lazy {
             peers.values.sortedByDescending { it.peerId }.flatMap { p -> p.drives.map { it.id to (it to p) } }.toMap()
+        }
 
-        val allItems: List<MediaItem> get() {
+        // Computed once per snapshot: the page, DLNA and the app read these many times.
+        val allItems: List<MediaItem> by lazy {
             val servers = drives.mapValues { it.value.second.peerId }
-            return items.values.flatten()
+            items.values.flatten()
                 .filter { it.driveId == null || servers[it.driveId] == it.peerId }
                 .sortedBy { it.title.lowercase() }
         }
+        private val byKind: Map<MediaKind, List<MediaItem>> by lazy { allItems.groupBy { it.kind } }
         val totalBytes: Long get() = peers.values.sumOf { it.totalBytes } + drives.values.sumOf { it.first.totalBytes }
         val freeBytes: Long get() = peers.values.sumOf { it.freeBytes } + drives.values.sumOf { it.first.freeBytes }
 
@@ -52,7 +55,7 @@ class ClusterIndex {
                 drives.values.map { (d, _) -> Device(d.id, d.name, counts[d.id] ?: 0) }.sortedBy { it.name.lowercase() }
         }
 
-        fun itemsOfKind(kind: MediaKind) = allItems.filter { it.kind == kind }
+        fun itemsOfKind(kind: MediaKind) = byKind[kind].orEmpty()
         fun find(id: String) = items.values.asSequence().flatten().firstOrNull { it.id == id }
     }
 

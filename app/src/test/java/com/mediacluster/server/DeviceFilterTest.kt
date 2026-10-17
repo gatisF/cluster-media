@@ -52,9 +52,25 @@ class DeviceFilterTest {
         assertTrue(html.contains("""<select id="dev""""))
         assertTrue(html.contains("""<option value="drive-1">Router drive (1)</option>"""))
         assertTrue(html.contains("""data-dev="drive-1" data-src="http://192.168.8.11:8765/media/-4""""))
-        assertTrue(html.contains("""<a href="http://192.168.8.10:8765/media/2" target="_blank" data-dev="a">"""))
+        assertTrue(html.contains("""<a href="http://192.168.8.10:8765/media/2" target="_blank" data-dev="a"><img loading="lazy" decoding="async" src="http://192.168.8.10:8765/thumb/2""""))
         assertFalse(html.contains("192.168.8.12:8765/media")) // the duplicate drive server is not used
         File("build/device-filter-page.html").writeText(html) // for checking the page by eye
+    }
+
+    @Test
+    fun bigLibraryRendersQuicklyAndCompressesWell() {
+        val big = ClusterIndex().apply {
+            for (p in 0 until 3) put(peer("p$p", "Phone $p", "192.168.8.${20 + p}"), (0 until 3_400).map {
+                item("p$p", it.toLong(), "IMG_2026_${p}_$it.jpg", if (it % 4 == 0) MediaKind.VIDEO else MediaKind.IMAGE)
+            })
+        }.snapshot.value
+        WebPage.render(big) // warm up
+        val t0 = System.nanoTime()
+        val html = WebPage.render(big)
+        val ms = (System.nanoTime() - t0) / 1_000_000
+        val gz = java.io.ByteArrayOutputStream().also { java.util.zip.GZIPOutputStream(it).use { z -> z.write(html.toByteArray()) } }.size()
+        println("10,200 files: page renders in $ms ms, ${html.length / 1024} KB, ${gz / 1024} KB gzipped")
+        assertTrue(ms < 1_000)
     }
 
     @Test

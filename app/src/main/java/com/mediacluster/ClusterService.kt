@@ -28,6 +28,7 @@ import com.mediacluster.library.MediaScanner
 import com.mediacluster.library.MediaSource
 import com.mediacluster.library.MediaWriter
 import com.mediacluster.library.NetworkDrive
+import com.mediacluster.library.Thumbnails
 import com.mediacluster.library.explainDriveError
 import com.mediacluster.library.PeerInfo
 import com.mediacluster.library.Uploader
@@ -93,12 +94,18 @@ class ClusterService : Service() {
         val cds = ContentDirectory(udn) { "MediaCluster (${index.snapshot.value.peers.size} phones)" }
         val settings = Cluster.settings(this)
         val writer = MediaWriter(this)
+        val thumbnails = Thumbnails(this)
         server = PeerHttpServer(
             PORT, ::selfInfo, { localItems }, index, cds,
             webPageEnabled = { settings.webPage.value },
             onUpload = { name, mime, length, input, driveId -> receive(writer, name, mime, length, input, driveId) },
             onRefresh = { Cluster.requestRescan(); driveRescan.trySend(Unit) },
-        ) { item -> if (item.driveId != null) drive?.takeIf { it.id == item.driveId }?.open(item) else phoneSource(item) }
+            open = { item -> if (item.driveId != null) drive?.takeIf { it.id == item.driveId }?.open(item) else phoneSource(item) },
+            thumbnail = { item ->
+                if (item.driveId == null) thumbnails.get(item, scanner.uriFor(item), null)
+                else drive?.takeIf { it.id == item.driveId }?.let { d -> thumbnails.get(item, null) { d.open(item)!!.openAt(0) } }
+            },
+        )
         server.start(5_000, false)
 
         ssdp = SsdpServer(udn, { "http://${localIp()}:$PORT/dlna/device.xml" }, wifiInterface())

@@ -49,3 +49,6 @@ data class StorageTarget(val name: String, val host: String, val port: Int, val 
 }
 
 fun PeerInfo.mediaUrl(item: MediaItem) = "http://$host:$port/media/${item.localId}"
+
+/** A small JPEG preview of [item] (photos and videos). */
+fun PeerInfo.thumbUrl(item: MediaItem) = "http://$host:$port/thumb/${item.localId}"

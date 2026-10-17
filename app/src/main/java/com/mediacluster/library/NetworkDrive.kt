@@ -155,15 +155,14 @@ class NetworkDrive(val config: DriveConfig, private val peerId: String) : AutoCl
             val file = SmbFile(url, context)
             val raf = file.openRandomAccess("r")
             raf.seek(offset)
-            object : InputStream() {
-                private val one = ByteArray(1)
-                override fun read(): Int = if (read(one, 0, 1) < 0) -1 else one[0].toInt() and 0xff
-                override fun read(b: ByteArray, off: Int, len: Int): Int = raf.read(b, off, len)
-                override fun close() {
+            // Each SMB read is a network round trip: read ahead in big pieces on a background thread.
+            ReadAheadStream(
+                readSource = { b, off, len -> raf.read(b, off, len) },
+                closeSource = {
                     runCatching { raf.close() }
                     file.close()
-                }
-            }
+                },
+            )
         }
     }
 

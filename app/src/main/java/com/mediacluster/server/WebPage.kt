@@ -6,6 +6,7 @@ import com.mediacluster.library.MediaItem
 import com.mediacluster.library.MediaKind
 import com.mediacluster.library.Uploader
 import com.mediacluster.library.mediaUrl
+import com.mediacluster.library.thumbUrl
 
 /**
  * The optional browser page at "/": the merged cluster library, playable in any browser,
@@ -127,7 +128,9 @@ document.querySelectorAll('.row').forEach(r => r.onclick = () => {
             items.isEmpty() -> """<p class="empty">$emptyText</p>"""
             kind == MediaKind.IMAGE -> items.mapNotNull { item ->
                 val url = url(snap, item) ?: return@mapNotNull null
-                """<a href="$url" target="_blank" data-dev="${esc(snap.deviceOf(item))}"><img loading="lazy" src="$url" alt="${esc(item.title)}"></a>"""
+                // The tile shows a ~320 px preview; tapping it opens the full photo.
+                val thumb = snap.peers[item.peerId]?.thumbUrl(item)?.let(::esc) ?: url
+                """<a href="$url" target="_blank" data-dev="${esc(snap.deviceOf(item))}"><img loading="lazy" decoding="async" src="$thumb" alt="${esc(item.title)}"></a>"""
             }.joinToString("", """<div class="grid">""", "</div>")
             else -> items.mapNotNull { item ->
                 val url = url(snap, item) ?: return@mapNotNull null
